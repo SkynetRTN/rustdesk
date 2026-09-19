@@ -1,20 +1,23 @@
-# SkynetGO Remote
+# SkyDesk
 
-A build of the RustDesk client with the Skynet server, its public key, the
-address-book API, and a distinct app identity compiled in. Installs as
-`SkynetGORemote`, keeps its own config and address book, runs its own service,
-and coexists with a stock RustDesk on the same machine.
+The SkynetGO project's build of the RustDesk client, with the Skynet server,
+its public key, the address-book API, and a distinct app identity compiled in.
+Installs as `SkyDesk`, keeps its own config and address book, runs its own
+service, and coexists with a stock RustDesk on the same machine. It sits in the
+`SkyLib` / `SkyNode` family of tools.
 
-Everything SkynetGO-specific lives in this directory plus one workflow:
+Everything SkyDesk-specific lives in this directory plus one workflow:
 
 | Path | Role |
 |---|---|
 | `skynetgo/config.env` | the five values that get compiled in (all public) |
-| `skynetgo/apply.py` | patches `libs/hbb_common/src/config.rs` at build time; `--check` verifies |
+| `skynetgo/apply.py` | patches three upstream files at build time; `--check` verifies |
 | `.github/workflows/skynetgo-windows.yml` | Windows x64 build, trimmed from upstream's `flutter-build.yml` |
 
 Branch layout: `master` mirrors upstream untouched. `skynetgo` is based on an
 upstream release tag and carries only the files above. Re-pinning is a rebase.
+(The directory and branch keep the project name, `skynetgo`; the product is
+`SkyDesk`.)
 
 ## Why a rebuild is required
 
@@ -30,6 +33,28 @@ exe name, and tray mutex all derive from `get_app_name()`
 `libs/hbb_common` is a git submodule (a separate repository). Rather than fork
 it too, `apply.py` patches it at build time and asserts every edit landed.
 
+## What gets patched, and why the exe name is not cosmetic
+
+`apply.py` edits three files:
+
+- `libs/hbb_common/src/config.rs` - `ORG`, `APP_NAME`, `RENDEZVOUS_SERVERS`,
+  `RS_PUB_KEY`, and a seeded `api-server` in `DEFAULT_SETTINGS`.
+- `flutter/windows/CMakeLists.txt` - `BINARY_NAME`, so the build emits
+  `SkyDesk.exe`.
+- `flutter/windows/runner/Runner.rc` - the version-resource strings, so Task
+  Manager and the file's Properties say SkyDesk.
+
+The `BINARY_NAME` edit is load-bearing. The Windows installer (`install_me` in
+`src/platform/windows.rs`) XCOPYs the extracted directory into
+`C:\Program Files\<APP_NAME>\` and then points the service (`sc create`), both
+shortcuts, and the `UninstallString` at `<APP_NAME>.exe` - but it never renames
+the copied exe; the `{rename_exe}` step exists only in a different install
+path. Upstream gets away with this because `rustdesk.exe` and `RustDesk.exe`
+are the same file on a case-insensitive filesystem. With a real app name the
+first build shipped `rustdesk.exe` next to a shortcut for `SkynetGORemote.exe`
+and a service that could not start. Emitting `<APP_NAME>.exe` from the
+compiler makes the install path identical to upstream's.
+
 ## One-time setup: the server keypair
 
 The client pins the server's public key. Generate the pair once, on any host
@@ -41,27 +66,27 @@ rustdesk-utils genkeypair
 
 Store both halves in the skynet repo's shared prod vault,
 `inventory/group_vars/prod/vault.yml` (`vault_rustdesk_private_key` /
-`vault_rustdesk_public_key`; the Ansible
-role deploys them to the VM). Paste the **public** half into `config.env` as
-`RS_PUB_KEY`. Never regenerate it: every deployed client would stop connecting.
+`vault_rustdesk_public_key`; the Ansible role deploys them to the VM). Paste
+the **public** half into `config.env` as `RS_PUB_KEY`. Never regenerate it:
+every deployed client would stop connecting.
 
 ## Building
 
-Push to `skynetgo`, or run the **SkynetGO Remote (Windows x64)** workflow from
-the Actions tab. The fork is public, so GitHub-hosted Windows runners are free
-and unmetered; the self-hosted Linux runner is not involved (Flutter Windows
+Push to `skynetgo`, or run the **SkyDesk (Windows x64)** workflow from the
+Actions tab. The fork is public, so GitHub-hosted Windows runners are free and
+unmetered; the self-hosted Linux runner is not involved (Flutter Windows
 desktop cannot cross-compile).
 
 Artifacts:
 
-- `SkynetGORemote-<version>-x64` - the single-file installer. Running it
-  extracts to a temp directory and launches the client; **Install** inside the
-  client copies it to `C:\Program Files\SkynetGORemote\SkynetGORemote.exe` and
-  registers the `SkynetGORemote` service.
-- `SkynetGORemote-<version>-x64-unpacked` - the raw build folder.
+- `SkyDesk-<version>-x64` - the single-file installer. Running it extracts to
+  a temp directory and launches `SkyDesk.exe`; **Install** inside the client
+  copies the directory to `C:\Program Files\SkyDesk\` and registers the
+  `SkyDesk` service.
+- `SkyDesk-<version>-x64-unpacked` - the raw build folder.
 
-Expect the first run to take well over an hour; vcpkg and Rust caches make
-later runs much faster.
+A cold build takes about 45 minutes; vcpkg and Rust caches make later runs
+faster.
 
 The `allow_empty_key` workflow input builds without a public key so the
 pipeline can be proven before the keypair exists. That client cannot connect
@@ -71,12 +96,29 @@ to anything; it is for the pipeline, not for people.
 
 Before distributing, on a machine that also has stock RustDesk:
 
-1. Install it. Confirm `C:\Program Files\SkynetGORemote\` and a service named
-   `SkynetGORemote` exist, and that stock RustDesk's install is untouched.
+1. Install it. Confirm `C:\Program Files\SkyDesk\SkyDesk.exe` exists (the exe
+   must carry the app name - see above), a service named `SkyDesk` is
+   running, and stock RustDesk's install is untouched.
 2. Open **Settings → Network**. The ID server and key should already read
    `remote.skynetgo.org` and the compiled-in key with nothing typed.
 3. Confirm stock RustDesk still launches and still reaches its own server
-   while SkynetGO Remote is running.
+   while SkyDesk is running.
+
+## Removing a broken earlier install
+
+The first build installed as `SkynetGORemote` with the exe left as
+`rustdesk.exe`, so its own uninstaller cannot find itself. From an elevated
+PowerShell, give it the file it expects and then let it clean up:
+
+```powershell
+Copy-Item "C:\Program Files\SkynetGORemote\rustdesk.exe" "C:\Program Files\SkynetGORemote\SkynetGORemote.exe"
+```
+
+```powershell
+& "C:\Program Files\SkynetGORemote\SkynetGORemote.exe" --uninstall
+```
+
+If the service still lingers: `sc.exe delete SkynetGORemote`.
 
 ## Re-pinning to a newer upstream release
 
@@ -103,11 +145,6 @@ basis of what actually connects to the server you run.
 
 ## Deliberately not customized (yet)
 
-- **Window title and the raw build's exe name** still say `rustdesk`
-  (`flutter/windows/CMakeLists.txt` `BINARY_NAME`, and the Flutter runner).
-  Cosmetic: the *installed* exe is named from `APP_NAME`. Changing
-  `BINARY_NAME` also changes paths the build steps reference by name, so it is
-  a deliberate follow-up rather than part of the first build.
 - **Code signing.** Unsigned builds trip SmartScreen ("More info → Run
   anyway"). Acceptable for staff distribution; revisit before wider release.
 - **MSI package** and the **virtual printer driver** upstream bundles. Neither
@@ -115,6 +152,8 @@ basis of what actually connects to the server you run.
 - **Direct IP access port.** Per-install setting in a separate config dir, so
   two apps only contend if both enable it. Server-mediated sessions never use
   it.
+- **Icon.** Still RustDesk's. The window title already follows `APP_NAME` at
+  runtime (`main.cpp` asks the core for it).
 
 ## License
 

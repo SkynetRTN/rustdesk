@@ -1,8 +1,8 @@
-name: SkynetGO Remote (Windows x64)
+name: SkyDesk (Windows x64)
 
-# Builds the SkynetGO Remote client: RustDesk pinned at the `skynetgo` branch's
-# base tag, with skynetgo/config.env compiled in (app name, rendezvous server,
-# server public key, API server). Trimmed from upstream
+# Builds SkyDesk, the SkynetGO project's RustDesk client: RustDesk pinned at
+# the `skynetgo` branch's base tag, with skynetgo/config.env compiled in (app
+# name, rendezvous server, server public key, API server). Trimmed from upstream
 # .github/workflows/flutter-build.yml at the same tag: x64 only, no code signing,
 # no MSI, no GitHub Release. Output is a workflow artifact.
 #
@@ -45,7 +45,7 @@ jobs:
       target_version: Windows10
 
   build-windows-x64:
-    name: SkynetGORemote windows x64
+    name: SkyDesk windows x64
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
     steps:
@@ -63,13 +63,17 @@ jobs:
 
       # The one SkynetGO-specific step. Patches libs/hbb_common/src/config.rs
       # (a submodule, so the change is applied at build time rather than
-      # committed) and then re-verifies it, so a silent no-op cannot ship a
-      # client pointed at rs-ny.rustdesk.com.
+      # committed), flutter/windows/CMakeLists.txt (the built exe name) and
+      # Runner.rc (version strings), then re-verifies all of it so a silent
+      # no-op cannot ship a client pointed at rs-ny.rustdesk.com. Exports
+      # APP_NAME for the packaging steps below.
       - name: Apply SkynetGO customization
         shell: bash
         run: |
           python3 skynetgo/apply.py ${{ inputs.allow_empty_key == true && '--allow-empty-key' || '' }}
           python3 skynetgo/apply.py --check
+          grep '^APP_NAME=' skynetgo/config.env >> "$GITHUB_ENV"
+          git --no-pager diff --stat
           git -C libs/hbb_common --no-pager diff --stat
 
       - name: Restore bridge files
@@ -180,27 +184,28 @@ jobs:
       - name: Upload unpacked build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: SkynetGORemote-${{ env.VERSION }}-x64-unpacked
+          name: ${{ env.APP_NAME }}-${{ env.VERSION }}-x64-unpacked
           path: rustdesk
 
-      # Single-file installer. Running it extracts to a temp dir and launches the
-      # client; "Install" inside the client then copies to
-      # C:\Program Files\SkynetGORemote\SkynetGORemote.exe and registers the
-      # SkynetGORemote service (all derived from the compiled-in APP_NAME).
+      # Single-file installer. Running it extracts to a temp dir and launches
+      # <APP_NAME>.exe; "Install" inside the client XCOPYs that dir to
+      # C:\Program Files\<APP_NAME>\ and registers the <APP_NAME> service. The
+      # installer does NOT rename the exe, which is why the build must already
+      # name it <APP_NAME>.exe (apply.py patches BINARY_NAME).
       - name: Build self-extracting executable
         shell: bash
         run: |
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
           pip3 install -r requirements.txt
-          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/${{ env.APP_NAME }}.exe
           popd
           mkdir -p ./Output
-          mv ./target/release/rustdesk-portable-packer.exe ./Output/SkynetGORemote-${{ env.VERSION }}-x64.exe
+          mv ./target/release/rustdesk-portable-packer.exe ./Output/${{ env.APP_NAME }}-${{ env.VERSION }}-x64.exe
           sha256sum ./Output/*.exe
 
       - name: Upload installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: SkynetGORemote-${{ env.VERSION }}-x64
-          path: Output/SkynetGORemote-${{ env.VERSION }}-x64.exe
+          name: ${{ env.APP_NAME }}-${{ env.VERSION }}-x64
+          path: Output/${{ env.APP_NAME }}-${{ env.VERSION }}-x64.exe
