@@ -39,8 +39,9 @@ with the server binaries:
 rustdesk-utils genkeypair
 ```
 
-Store both halves in the skynet repo's `inventory/group_vars/prod_remote`
-vault (`vault_rustdesk_private_key` / `vault_rustdesk_public_key`; the Ansible
+Store both halves in the skynet repo's shared prod vault,
+`inventory/group_vars/prod/vault.yml` (`vault_rustdesk_private_key` /
+`vault_rustdesk_public_key`; the Ansible
 role deploys them to the VM). Paste the **public** half into `config.env` as
 `RS_PUB_KEY`. Never regenerate it: every deployed client would stop connecting.
 
