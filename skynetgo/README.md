@@ -38,7 +38,8 @@ it too, `apply.py` patches it at build time and asserts every edit landed.
 `apply.py` edits three files:
 
 - `libs/hbb_common/src/config.rs` - `ORG`, `APP_NAME`, `RENDEZVOUS_SERVERS`,
-  `RS_PUB_KEY`, and a seeded `api-server` in `DEFAULT_SETTINGS`.
+  `RS_PUB_KEY`, and three seeded options in `DEFAULT_SETTINGS`: `api-server`,
+  `custom-rendezvous-server`, `key`.
 - `flutter/windows/CMakeLists.txt` - `BINARY_NAME`, so the build emits
   `SkyDesk.exe`.
 - `flutter/windows/runner/Runner.rc` - the version-resource strings, so Task
@@ -54,6 +55,19 @@ are the same file on a case-insensitive filesystem. With a real app name the
 first build shipped `rustdesk.exe` next to a shortcut for `SkynetGORemote.exe`
 and a service that could not start. Emitting `<APP_NAME>.exe` from the
 compiler makes the install path identical to upstream's.
+
+### Constants vs. options
+
+The rendezvous host and key are compiled in twice, deliberately. The
+**constants** (`RENDEZVOUS_SERVERS`, `RS_PUB_KEY`) are what the client uses
+when the corresponding options are empty - `get_rendezvous_servers()` and the
+key lookup fall through to them. The **options** seeded into
+`DEFAULT_SETTINGS` are what Settings → Network displays and what a user can
+override. Without the seed the client connects correctly but the ID-server
+and key fields read blank, exactly as stock RustDesk does while silently
+using `rs-ny.rustdesk.com`. Seeding both layers means the UI tells the
+truth. `relay-server` is not seeded: hbbs advertises the relay (`-r`), so
+clients follow the server if it ever moves.
 
 ## One-time setup: the server keypair
 
@@ -99,8 +113,10 @@ Before distributing, on a machine that also has stock RustDesk:
 1. Install it. Confirm `C:\Program Files\SkyDesk\SkyDesk.exe` exists (the exe
    must carry the app name - see above), a service named `SkyDesk` is
    running, and stock RustDesk's install is untouched.
-2. Open **Settings → Network**. The ID server and key should already read
-   `remote.skynetgo.org` and the compiled-in key with nothing typed.
+2. Open **Settings → Network**. ID server, key, and API server should
+   already read `remote.skynetgo.org`, the compiled-in key, and
+   `https://remote.skynetgo.org` with nothing typed. Relay server is blank
+   by design (see *Constants vs. options*).
 3. Confirm stock RustDesk still launches and still reaches its own server
    while SkyDesk is running.
 

@@ -10,8 +10,17 @@ Reads skynetgo/config.env and rewrites compiled-in defaults in three files:
     RENDEZVOUS_SERVERS   the ID server (hbbs); hbbs advertises the relay.
     RS_PUB_KEY           the server's public key, so the client only ever
                          talks to our server.
-    DEFAULT_SETTINGS     seeds `api-server`; otherwise the client derives
-                         http://<host>:21114, which our server does not expose.
+    DEFAULT_SETTINGS     seeds `api-server` (otherwise the client derives
+                         http://<host>:21114, which our server does not
+                         expose) plus `custom-rendezvous-server` and `key`.
+                         Those two duplicate the constants above on purpose:
+                         the constants are what the client USES when the
+                         options are empty, but Settings > Network displays
+                         the options, so without the seed the ID-server and
+                         key fields read blank (as stock RustDesk does while
+                         silently using rs-ny). `relay-server` is deliberately
+                         NOT seeded: hbbs advertises the relay, and pinning it
+                         client-side would stop clients following the server.
 
   flutter/windows/CMakeLists.txt
     BINARY_NAME          the BUILT exe's name. Not cosmetic: the Windows
@@ -109,7 +118,8 @@ def build_rules(cfg: dict[str, str]):
     host = cfg["RENDEZVOUS_SERVER"]
     key = cfg["RS_PUB_KEY"]
     api = cfg["API_SERVER"]
-    api_entry = '("api-server".to_owned(), "' + api + '".to_owned())'
+    seeded = (("api-server", api), ("custom-rendezvous-server", host), ("key", key))
+    entries = ", ".join('("' + k + '".to_owned(), "' + v + '".to_owned())' for k, v in seeded)
     desc = app + " Remote Desktop"
     return [
         # --- libs/hbb_common/src/config.rs -------------------------------------
@@ -140,13 +150,13 @@ def build_rules(cfg: dict[str, str]):
             lambda m: m.group(1) + key + m.group(2),
         ),
         (
-            "config.rs", "DEFAULT_SETTINGS/api-server",
+            "config.rs", "DEFAULT_SETTINGS/seeded-options",
             re.compile(r'(pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = )Default::default\(\);'),
             re.compile(
                 r'pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new\(HashMap::from\(\['
-                + e(api_entry) + r'\]\)\);'
+                + e(entries) + r'\]\)\);'
             ),
-            lambda m: m.group(1) + "RwLock::new(HashMap::from([" + api_entry + "]));",
+            lambda m: m.group(1) + "RwLock::new(HashMap::from([" + entries + "]));",
         ),
         # --- flutter/windows/CMakeLists.txt ------------------------------------
         (
