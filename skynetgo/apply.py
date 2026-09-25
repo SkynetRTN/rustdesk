@@ -58,6 +58,7 @@ CONFIG_ENV = HERE / "config.env"
 
 TARGETS = {
     "config.rs": ROOT / "libs" / "hbb_common" / "src" / "config.rs",
+    "common.rs": ROOT / "src" / "common.rs",
     "CMakeLists.txt": ROOT / "flutter" / "windows" / "CMakeLists.txt",
     "Runner.rc": ROOT / "flutter" / "windows" / "runner" / "Runner.rc",
 }
@@ -189,6 +190,13 @@ def build_rules(cfg: dict[str, str]):
             re.compile(r'(VALUE "ProductName", ")RustDesk(" "\\0")'),
             re.compile(r'VALUE "ProductName", "' + e(app) + r'" "\\0"'),
             lambda m: m.group(1) + app + m.group(2),
+        ),
+        # --- src/common.rs (main repo) -----------------------------------------
+        (
+            "common.rs", "secure_tcp-noop",
+            re.compile(re.escape("    if use_ws() {")),
+            re.compile(re.escape("    if true || use_ws() {")),
+            lambda m: "    if true || use_ws() {  // SkyDesk: OSS hbbs never answers secure_tcp's KeyExchange; a logged-in client hangs here until timeout. Force-skip. Logged-out never calls it; peer session stays end-to-end encrypted.",
         ),
     ]
 
