@@ -21,6 +21,19 @@ Reads skynetgo/config.env and rewrites compiled-in defaults in three files:
                          silently using rs-ny). `relay-server` is deliberately
                          NOT seeded: hbbs advertises the relay, and pinning it
                          client-side would stop clients following the server.
+    OVERWRITE_SETTINGS   LOCKS the options in LOCKED_SETTINGS below (auto-update
+                         off). Unlike a default,
+                         an overwrite beats whatever RustDesk2.toml holds,
+                         the client refuses to save a different value (and
+                         deletes a stored one), and the Settings control
+                         renders disabled.
+    OVERWRITE_LOCAL_SETTINGS
+                         the same lock for LOCKED_LOCAL_SETTINGS (per-user
+                         LocalConfig options): the startup update check.
+
+  src/common.rs
+    secure_tcp           skipped, so a client signed in to the address book
+                         can connect to OSS hbbs (see the rule's comment).
 
   flutter/windows/CMakeLists.txt
     BINARY_NAME          the BUILT exe's name. Not cosmetic: the Windows
@@ -44,6 +57,11 @@ CI runs it right after applying.
 Every rule must match exactly once in the pristine source. An upstream
 refactor that moves or renames a constant therefore fails the build loudly
 rather than being skipped.
+
+A lock only works while upstream still reads that option key the way we
+assume. CONSUMERS lists read-only checks on the code that enforces each
+locked option; both modes run them, and a miss fails the build, because a
+renamed key would leave the overwrite in place doing nothing.
 """
 from __future__ import annotations
 
@@ -64,6 +82,82 @@ TARGETS = {
 }
 
 REQUIRED = ("APP_NAME", "ORG", "RENDEZVOUS_SERVER", "RS_PUB_KEY", "API_SERVER")
+
+# Security options SkyDesk compiles in as LOCKED (OVERWRITE_SETTINGS), not
+# merely defaulted. These are what we tell sites and their IT reviewers the
+# client does, so a user or an old RustDesk2.toml must not be able to change
+# them. hbb_common config.rs: Config::get_option reads OVERWRITE_SETTINGS
+# before the stored options; set_option/set_options refuse a locked key and
+# purge any stored value; ui_interface.rs is_option_fixed disables the control.
+#
+# Deliberately NEITHER locked NOR seeded: approve-mode and verification-method.
+# Each site chooses how sessions are approved, and many need UNATTENDED access:
+# the installed service plus a permanent password set per machine (Settings,
+# or `SkyDesk.exe --password <pw>` elevated), never compiled into the build.
+# The stock defaults (approve by password or click; both password types) allow
+# that. PERMANENT_PASSWORD_BREAKERS below makes check_policy refuse the values
+# that would take it away, and the permanent-password:* CONSUMERS keep the
+# maps that can disable it empty.
+#
+# Also left to each site: enable-lan-discovery (stock: on). A compiled lock
+# applies at every site, and a site that wants discovery off can set it per
+# machine ("Deny LAN discovery" in Settings > Security).
+LOCKED_SETTINGS = (
+    # Never download and install an update. Ticked, an installed build posts
+    # to api.rustdesk.com daily and installs STOCK rustdesk-<ver>.exe over
+    # SkyDesk (src/updater.rs). Off by default upstream; locked so it stays off.
+    ("allow-auto-update", "N"),
+)
+
+# Per-user LocalConfig options, locked the same way (OVERWRITE_LOCAL_SETTINGS).
+LOCKED_LOCAL_SETTINGS = (
+    # Don't ask api.rustdesk.com for the latest version on every UI start
+    # (src/common.rs check_software_update, called from flutter/lib/common.dart).
+    # Default on. It installs nothing, but its "new version" notice points at
+    # stock RustDesk, which is never the right download for a SkyDesk user.
+    ("enable-check-update", "N"),
+)
+
+# Option values that stop a permanent password from working. Never lock or
+# seed these: click mode never consults a password (src/server/connection.rs),
+# and temporary-only rejects the permanent one (password_security.rs).
+PERMANENT_PASSWORD_BREAKERS = {
+    ("approve-mode", "click"),
+    ("verification-method", "use-temporary-password"),
+}
+
+# Read-only checks: (label, file under ROOT, regex that must match at least
+# once). Each pins the code that gives a locked option its effect, so a
+# re-pin that renames a key or moves the gate fails here instead of shipping
+# a lock that does nothing. Patterns use \s* where upstream wraps lines.
+CONSUMERS = (
+    ("overwrite-wins:Config", "libs/hbb_common/src/config.rs",
+     r"get_or\(\s*&OVERWRITE_SETTINGS,\s*&CONFIG2\.read\(\)\.unwrap\(\)\.options,"),
+    ("overwrite-refuses-save:Config", "libs/hbb_common/src/config.rs",
+     r"pub fn set_option\(k: String, v: String\) \{\s*if !is_option_can_save\(&OVERWRITE_SETTINGS, &k,"),
+    ("overwrite-wins:LocalConfig", "libs/hbb_common/src/config.rs",
+     r"get_or\(\s*&OVERWRITE_LOCAL_SETTINGS,"),
+    ("allow-auto-update:key", "libs/hbb_common/src/config.rs",
+     r'pub const OPTION_ALLOW_AUTO_UPDATE: &str = "allow-auto-update";'),
+    ("allow-auto-update:gate", "src/updater.rs",
+     r"if !\(manually \|\| config::Config::get_bool_option\(config::keys::OPTION_ALLOW_AUTO_UPDATE\)\)"),
+    ("enable-check-update:key", "libs/hbb_common/src/config.rs",
+     r'pub const OPTION_ENABLE_CHECK_UPDATE: &str = "enable-check-update";'),
+    ("enable-check-update:gate", "src/common.rs",
+     r"LocalConfig::get_option\(keys::OPTION_ENABLE_CHECK_UPDATE\)"),
+    # Permanent password stays settable and usable. With verification-method
+    # unset, permanent_enabled() is true. BUILTIN_SETTINGS holds
+    # disable-change-permanent-password (Settings button, Config::
+    # set_permanent_password, the --password CLI); HARD_SETTINGS holds
+    # disable-settings (blocks --password) and a preset password. Both must
+    # stay empty in the PATCHED file, so no future rule can fill them.
+    ("permanent-password:enabled-by-default", "libs/hbb_common/src/password_security.rs",
+     r"pub fn permanent_enabled\(\) -> bool \{\s*verification_method\(\) != VerificationMethod::OnlyUseTemporaryPassword"),
+    ("permanent-password:builtin-settings-empty", "libs/hbb_common/src/config.rs",
+     r"pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default\(\);"),
+    ("permanent-password:hard-settings-empty", "libs/hbb_common/src/config.rs",
+     r"pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default\(\);"),
+)
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -106,6 +200,81 @@ def validate(cfg: dict[str, str], allow_empty_key: bool) -> None:
         sys.exit("skynetgo/config.env is not usable:\n  - " + "\n  - ".join(problems))
 
 
+def seeded_settings(cfg: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    """DEFAULT_SETTINGS seeds: user-overridable, unlike LOCKED_SETTINGS."""
+    return (
+        ("api-server", cfg["API_SERVER"]),
+        ("custom-rendezvous-server", cfg["RENDEZVOUS_SERVER"]),
+        ("key", cfg["RS_PUB_KEY"]),
+    )
+
+
+def hashmap_entries(pairs) -> str:
+    """The body of a Rust `HashMap::from([...])` literal of String pairs."""
+    return ", ".join('("' + k + '".to_owned(), "' + v + '".to_owned())' for k, v in pairs)
+
+
+def hashmap_rule(name: str, static: str, pairs):
+    """Rule that fills an empty `pub static ref <static>` map in config.rs."""
+    e = re.escape
+    entries = hashmap_entries(pairs)
+    decl = "pub static ref " + static + ": RwLock<HashMap<String, String>> = "
+    return (
+        "config.rs", name,
+        re.compile("(" + e(decl) + r")Default::default\(\);"),
+        re.compile(e(decl) + r"RwLock::new\(HashMap::from\(\[" + e(entries) + r"\]\)\);"),
+        lambda m: m.group(1) + "RwLock::new(HashMap::from([" + entries + "]));",
+    )
+
+
+def check_policy(cfg: dict[str, str]) -> None:
+    """Refuse seed/lock combinations that contradict each other or break permanent passwords."""
+    seeded_pairs = set(seeded_settings(cfg))
+    locked_pairs = set(LOCKED_SETTINGS + LOCKED_LOCAL_SETTINGS)
+    both = sorted({k for k, _ in seeded_pairs} & {k for k, _ in locked_pairs})
+    if both:
+        # One value displayed, another enforced.
+        sys.exit("skynetgo/apply.py: keys both seeded (DEFAULT_SETTINGS) and locked: " + ", ".join(both))
+    breakers = sorted(f"{k}={v}" for k, v in (seeded_pairs | locked_pairs) & PERMANENT_PASSWORD_BREAKERS)
+    if breakers:
+        sys.exit("skynetgo/apply.py: " + ", ".join(breakers) + " would stop permanent passwords from working; "
+                 "sites need them for unattended access (see LOCKED_SETTINGS)")
+
+
+def check_consumers(texts: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Run CONSUMERS plus the no-manual-update-caller check; return (ok, errors)."""
+    ok: list[str] = []
+    errors: list[str] = []
+    # Files apply.py also patches are read from memory (patched or not, the
+    # consumer code is untouched); the rest straight from disk.
+    by_path = {TARGETS[label]: text for label, text in texts.items()}
+    for label, rel, pattern in CONSUMERS:
+        path = ROOT / rel
+        if not path.is_file():
+            errors.append(f"consumer {label}: {rel} not found")
+            continue
+        text = by_path[path] if path in by_path else read(path)
+        if re.search(pattern, text):
+            ok.append(label)
+        elif label.startswith("permanent-password:"):
+            errors.append(f"consumer {label}: pattern not found in {rel}; a permanent password may no "
+                          f"longer be settable or usable, which unattended sites depend on")
+        else:
+            errors.append(f"consumer {label}: pattern not found in {rel}; upstream changed how this "
+                          f"locked option is read, so the lock may no longer do anything")
+    # updater.rs has a `manually` path that skips allow-auto-update. Upstream
+    # never calls it; make sure that stays true.
+    hits = [p.relative_to(ROOT).as_posix() for p in (ROOT / "src").rglob("*.rs")
+            if "manually_check_update" in read(p)]
+    if hits == ["src/updater.rs"] and read(ROOT / "src" / "updater.rs").count("manually_check_update") == 1:
+        ok.append("allow-auto-update:no-manual-caller")
+    else:
+        errors.append("consumer allow-auto-update:no-manual-caller: updater::manually_check_update is now "
+                      f"referenced outside its definition ({', '.join(hits)}); that path installs updates "
+                      "regardless of allow-auto-update")
+    return ok, errors
+
+
 def build_rules(cfg: dict[str, str]):
     """Each rule: (target, name, pristine regex, patched regex, replacement).
 
@@ -118,9 +287,6 @@ def build_rules(cfg: dict[str, str]):
     app = cfg["APP_NAME"]
     host = cfg["RENDEZVOUS_SERVER"]
     key = cfg["RS_PUB_KEY"]
-    api = cfg["API_SERVER"]
-    seeded = (("api-server", api), ("custom-rendezvous-server", host), ("key", key))
-    entries = ", ".join('("' + k + '".to_owned(), "' + v + '".to_owned())' for k, v in seeded)
     desc = app + " Remote Desktop"
     return [
         # --- libs/hbb_common/src/config.rs -------------------------------------
@@ -150,15 +316,10 @@ def build_rules(cfg: dict[str, str]):
             re.compile(r'pub const RS_PUB_KEY: &str = "' + e(key) + r'";'),
             lambda m: m.group(1) + key + m.group(2),
         ),
-        (
-            "config.rs", "DEFAULT_SETTINGS/seeded-options",
-            re.compile(r'(pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = )Default::default\(\);'),
-            re.compile(
-                r'pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new\(HashMap::from\(\['
-                + e(entries) + r'\]\)\);'
-            ),
-            lambda m: m.group(1) + "RwLock::new(HashMap::from([" + entries + "]));",
-        ),
+        hashmap_rule("DEFAULT_SETTINGS/seeded-options", "DEFAULT_SETTINGS", seeded_settings(cfg)),
+        hashmap_rule("OVERWRITE_SETTINGS/locked-options", "OVERWRITE_SETTINGS", LOCKED_SETTINGS),
+        *([hashmap_rule("OVERWRITE_LOCAL_SETTINGS/locked-options", "OVERWRITE_LOCAL_SETTINGS",
+                        LOCKED_LOCAL_SETTINGS)] if LOCKED_LOCAL_SETTINGS else []),
         # --- flutter/windows/CMakeLists.txt ------------------------------------
         (
             "CMakeLists.txt", "BINARY_NAME",
@@ -225,6 +386,7 @@ def main() -> int:
     cfg = load_env(CONFIG_ENV)
     # --check verifies the files match whatever config.env says, key or no key.
     validate(cfg, allow_empty_key=args.allow_empty_key or args.check)
+    check_policy(cfg)
 
     texts = {label: read(path) for label, path in TARGETS.items()}
     changed: set[str] = set()
@@ -253,6 +415,9 @@ def main() -> int:
             errors.append(f"{label}: expected the upstream form exactly once, found {n_pristine} "
                           f"(patched-form matches: {n_patched}); upstream may have changed shape")
 
+    consumers_ok, consumer_errors = check_consumers(texts)
+    errors.extend(consumer_errors)
+
     if errors:
         sys.exit("skynetgo/apply.py FAILED:\n  - " + "\n  - ".join(errors))
 
@@ -263,8 +428,10 @@ def main() -> int:
         print("applied:         " + ", ".join(applied))
     if already:
         print(("verified:        " if args.check else "already applied: ") + ", ".join(already))
+    print("consumers ok:    " + ", ".join(consumers_ok))
     print(f"APP_NAME={cfg['APP_NAME']}  ORG={cfg['ORG']}  RENDEZVOUS_SERVER={cfg['RENDEZVOUS_SERVER']}  "
           f"API_SERVER={cfg['API_SERVER']}")
+    print("LOCKED: " + "  ".join(f"{k}={v}" for k, v in LOCKED_SETTINGS + LOCKED_LOCAL_SETTINGS))
     print("RS_PUB_KEY=" + (cfg["RS_PUB_KEY"] or "<EMPTY: smoke-test build, this client cannot connect>"))
     return 0
 

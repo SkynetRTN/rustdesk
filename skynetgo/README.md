@@ -11,7 +11,7 @@ Everything SkyDesk-specific lives in this directory plus one workflow:
 | Path | Role |
 |---|---|
 | `skynetgo/config.env` | the five values that get compiled in (all public) |
-| `skynetgo/apply.py` | patches three upstream files at build time; `--check` verifies |
+| `skynetgo/apply.py` | patches four upstream files at build time; `--check` verifies |
 | `.github/workflows/skynetgo-windows.yml` | Windows x64 build, trimmed from upstream's `flutter-build.yml` |
 
 Branch layout: `master` mirrors upstream untouched. `skynetgo` is based on an
@@ -35,11 +35,15 @@ it too, `apply.py` patches it at build time and asserts every edit landed.
 
 ## What gets patched, and why the exe name is not cosmetic
 
-`apply.py` edits three files:
+`apply.py` edits four files:
 
 - `libs/hbb_common/src/config.rs` - `ORG`, `APP_NAME`, `RENDEZVOUS_SERVERS`,
-  `RS_PUB_KEY`, and three seeded options in `DEFAULT_SETTINGS`: `api-server`,
-  `custom-rendezvous-server`, `key`.
+  `RS_PUB_KEY`, three seeded options in `DEFAULT_SETTINGS` (`api-server`,
+  `custom-rendezvous-server`, `key`), and the locked security options in
+  `OVERWRITE_SETTINGS` / `OVERWRITE_LOCAL_SETTINGS` (see *Locked settings*).
+- `src/common.rs` - skips `secure_tcp`, which OSS hbbs never answers, so a
+  client signed in to the address book can connect. Peer sessions stay
+  end-to-end encrypted.
 - `flutter/windows/CMakeLists.txt` - `BINARY_NAME`, so the build emits
   `SkyDesk.exe`.
 - `flutter/windows/runner/Runner.rc` - the version-resource strings, so Task
@@ -68,6 +72,50 @@ and key fields read blank, exactly as stock RustDesk does while silently
 using `rs-ny.rustdesk.com`. Seeding both layers means the UI tells the
 truth. `relay-server` is not seeded: hbbs advertises the relay (`-r`), so
 clients follow the server if it ever moves.
+
+### Locked settings
+
+A seeded default is only a starting value; the user can change it. These
+options are **locked** instead, because changing them would replace SkyDesk
+with stock RustDesk or have it check in with RustDesk's own servers:
+
+| Option | Locked to | Effect | Stock default |
+|---|---|---|---|
+| `allow-auto-update` | `N` | never downloads or installs an update | off, but a user can tick it, and it installs **stock** RustDesk over SkyDesk |
+| `enable-check-update` (per-user) | `N` | no version check against `api.rustdesk.com` on startup | on; its notice points at stock RustDesk |
+
+How the lock works (hbb_common `config.rs`): `Config::get_option` reads
+`OVERWRITE_SETTINGS` before the options stored in `RustDesk2.toml`, so an
+old stored value is ignored. `set_option` refuses a locked key and deletes
+any stored value for it, and `is_option_fixed` makes the Settings control
+render disabled. The lock is compiled in, so it also holds when SkyDesk runs
+without installing, and in both the installed service and the user's UI.
+Upstream's only other writer of these maps is `read_custom_client`, which
+needs a config signed by RustDesk's own key.
+
+**Deliberately not locked: how sessions are approved.** `approve-mode` and
+`verification-method` are neither locked nor seeded, so each site chooses
+and the stock defaults apply (accept by password or click; one-time and
+permanent passwords both work). Many sites need unattended access, which
+means the installed service plus a **permanent password set per machine**,
+in Settings or with `SkyDesk.exe --password <pw>` from an elevated prompt.
+That password is never compiled into the build. `apply.py` refuses to lock
+or seed `approve-mode=click` or `verification-method=use-temporary-password`
+(either one disables the permanent password), and its checks confirm that
+`BUILTIN_SETTINGS` and `HARD_SETTINGS`, the maps that can disable changing
+or using it, stay empty.
+
+**Also left to each site: LAN discovery** (`enable-lan-discovery`, stock
+on). A compiled lock would apply at every site; a site that wants it off
+ticks "Deny LAN discovery" in Settings → Security on each machine.
+
+A lock is only as good as the code that reads the key. `apply.py` therefore
+also runs read-only **consumer checks** (`CONSUMERS`): it confirms each
+locked key is still read where we expect (`updater.rs`, `common.rs`), and
+that
+`updater::manually_check_update`, the one path that installs regardless of
+`allow-auto-update`, still has no caller. A re-pin that renames a key fails
+the build instead of shipping a lock that does nothing.
 
 ## One-time setup: the server keypair
 
@@ -117,7 +165,12 @@ Before distributing, on a machine that also has stock RustDesk:
    already read `remote.skynetgo.org`, the compiled-in key, and
    `https://remote.skynetgo.org` with nothing typed. Relay server is blank
    by design (see *Constants vs. options*).
-3. Confirm stock RustDesk still launches and still reaches its own server
+3. Open **Settings → Security**. The Password card is editable, including
+   "Set permanent password", and "Deny LAN discovery" is unticked and
+   editable. On an installed build, **Settings → General** shows "Auto
+   update" unticked and disabled. Set a permanent password and connect from
+   a second SkyDesk with it: the session opens with nobody at the target.
+4. Confirm stock RustDesk still launches and still reaches its own server
    while SkyDesk is running.
 
 ## Removing a broken earlier install
@@ -149,7 +202,9 @@ python3 skynetgo/apply.py && python3 skynetgo/apply.py --check
 pointers on demand and aborts on the first upstream ref whose `hbb_common`
 commit is unreachable. If `apply.py` reports that a rule matched zero or
 several times, upstream moved a constant - fix the regex in `build_rules`
-rather than the source.
+rather than the source. If a **consumer** check fails, read the new upstream
+code first: update the pattern only once you have confirmed the locked
+option is still enforced (and under which key).
 
 Then re-derive `env:` and the step list in `skynetgo-windows.yml` from the new
 tag's `flutter-build.yml` (`build-for-windows-flutter`, x86_64 entry). Update
